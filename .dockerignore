@@ -1,0 +1,6 @@
+.git
+.github
+.env
+coverage.out
+*.exe
+/tt-worker

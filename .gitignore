@@ -1,0 +1,6 @@
+.env
+# Ignore only locally built root binaries, not cmd/tt-worker or cmd/mock-server.
+/tt-worker
+/mock-server
+coverage.out
+.env
