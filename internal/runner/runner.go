@@ -21,6 +21,12 @@ type Runner struct {
 	LogDetail string
 }
 
+type ProxyError struct{ Err error }
+
+func (e ProxyError) Error() string      { return e.Err.Error() }
+func (e ProxyError) Unwrap() error      { return e.Err }
+func (e ProxyError) ProxyFailure() bool { return true }
+
 func (r Runner) Execute(ctx context.Context, client *http.Client, device model.Device, target model.Target) error {
 	requestDevice := make(model.Device, len(device))
 	for key, value := range device {
@@ -48,11 +54,16 @@ func (r Runner) Execute(ctx context.Context, client *http.Client, device model.D
 	resp, err := client.Do(req)
 	if err != nil {
 		r.logRequest(target, requestDevice, signed.URL, 0, time.Since(started), nil, err)
-		return fmt.Errorf("target request: %w", err)
+		return ProxyError{Err: fmt.Errorf("target request: %w", err)}
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
+		return ProxyError{Err: fmt.Errorf("read target response: %w", err)}
+	}
+	if resp.StatusCode == http.StatusProxyAuthRequired || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		err := ProxyError{Err: fmt.Errorf("target rejected proxy with http %d", resp.StatusCode)}
+		r.logRequest(target, requestDevice, signed.URL, resp.StatusCode, time.Since(started), raw, err)
 		return err
 	}
 	validationErr := r.Handler.Validate(resp.StatusCode, raw)

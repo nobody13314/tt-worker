@@ -10,7 +10,7 @@ func TestLoadBusinessDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.TaskTypeID != 38 || c.GroupSize != 30 || c.FailureRatio != .8 || c.MaxProxyRotations != 2 || c.LogDetail != "all" || c.GatewayBusiness != "tt_dz" {
+	if c.TaskTypeID != 38 || c.ProxyReuseLimit != 10 || c.GroupSize != 10 || c.LogDetail != "all" || c.GatewayBusiness != "tt_dz" {
 		t.Fatalf("unexpected config: %+v", c)
 	}
 }

@@ -41,9 +41,9 @@ func main() {
 	} else {
 		devices = device.NewHTTPProvider(cfg.DeviceBaseURL, cfg.DeviceAcquirePath, cfg.RequestTimeout)
 	}
-	gateway := proxygateway.New(cfg.GatewayURL, cfg.GatewayAPIKey, cfg.GatewayBusiness, cfg.WorkerID, cfg.RequestTimeout)
+	gateway := proxygateway.New(cfg.GatewayURL, cfg.GatewayAPIKey, cfg.GatewayBusiness, cfg.WorkerID, cfg.RequestTimeout, cfg.ProxyReuseLimit)
 	executor := runner.Runner{Handler: handler, Signer: signer.New(cfg.SignerURL, cfg.RequestTimeout), LogDetail: cfg.LogDetail}
-	log.Printf("tt_worker started business=%s task_type=%d group=%d failure_ratio=%.0f%%", cfg.Business, cfg.TaskTypeID, cfg.GroupSize, cfg.FailureRatio*100)
+	log.Printf("tt_worker started business=%s task_type=%d proxy_reuse_limit=%d group=%d", cfg.Business, cfg.TaskTypeID, cfg.ProxyReuseLimit, cfg.GroupSize)
 	for ctx.Err() == nil {
 		task, err := tasks.Get(ctx, cfg.TaskTypeID)
 		if err != nil {
@@ -235,7 +235,7 @@ func executeTailPass(
 func executeBatch(ctx context.Context, cfg config.Config, provider device.Provider, gateway engine.Gateway, newClient engine.ClientFactory, executor engine.Executor, batch []model.Device, target model.Target, taskID string, batchIndex *int) (engine.Result, error) {
 	e := engine.Engine{
 		Gateway: gateway, NewClient: newClient, Executor: executor,
-		GroupSize: cfg.GroupSize, FailureRatio: cfg.FailureRatio, MaxRotations: cfg.MaxProxyRotations, Concurrency: cfg.Concurrency,
+		GroupSize: cfg.GroupSize, Concurrency: cfg.Concurrency,
 		RequestPrefix: cfg.WorkerID + "-task-" + taskID + "-batch-" + fmt.Sprint(*batchIndex),
 	}
 	(*batchIndex)++

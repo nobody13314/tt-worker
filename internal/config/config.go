@@ -28,9 +28,8 @@ type Config struct {
 	GatewayAPIKey      string
 	GatewayBusiness    string
 	WorkerID           string
+	ProxyReuseLimit    int
 	GroupSize          int
-	FailureRatio       float64
-	MaxProxyRotations  int
 	Concurrency        int
 	LogDetail          string
 	PollInterval       time.Duration
@@ -64,8 +63,8 @@ func Load() (Config, error) {
 		GatewayAPIKey:      os.Getenv("GATEWAY_API_KEY"),
 		GatewayBusiness:    env("PROXY_GATEWAY_BUSINESS", business),
 		WorkerID:           env("PROXY_GATEWAY_WORKER_ID", "tt-worker"),
-		GroupSize:          envInt("GROUP_SIZE", 30), FailureRatio: envFloat("PROXY_FAILURE_RATIO", .8),
-		MaxProxyRotations: envInt("MAX_PROXY_ROTATIONS", 2), Concurrency: envInt("CONCURRENCY", 30),
+		ProxyReuseLimit:    envInt("PROXY_REUSE_LIMIT", 10),
+		GroupSize:          envInt("GROUP_SIZE", 10), Concurrency: envInt("CONCURRENCY", 30),
 		LogDetail:      strings.ToLower(env("LOG_DETAIL", "all")),
 		PollInterval:   time.Duration(envInt("POLL_INTERVAL_SECONDS", 5)) * time.Second,
 		RequestTimeout: time.Duration(envInt("REQUEST_TIMEOUT_SECONDS", 30)) * time.Second,
@@ -76,11 +75,8 @@ func Load() (Config, error) {
 	if c.GatewayURL == "" || c.GatewayAPIKey == "" {
 		return Config{}, fmt.Errorf("PROXY_GATEWAY_URL and GATEWAY_API_KEY are required")
 	}
-	if c.GroupSize < 1 || c.Concurrency < 1 || c.DeviceBatchSize < 1 || c.MaxProxyRotations < 0 {
-		return Config{}, fmt.Errorf("group/concurrency/rotation configuration is invalid")
-	}
-	if c.FailureRatio <= 0 || c.FailureRatio > 1 {
-		return Config{}, fmt.Errorf("PROXY_FAILURE_RATIO must be in (0,1]")
+	if c.ProxyReuseLimit < 1 || c.GroupSize < 1 || c.Concurrency < 1 || c.DeviceBatchSize < 1 {
+		return Config{}, fmt.Errorf("proxy reuse, group, concurrency and device batch configuration must be positive")
 	}
 	if c.LogDetail != "summary" && c.LogDetail != "failures" && c.LogDetail != "all" {
 		return Config{}, fmt.Errorf("LOG_DETAIL must be summary, failures or all")
@@ -96,13 +92,6 @@ func env(name, fallback string) string {
 }
 func envInt(name string, fallback int) int {
 	v, err := strconv.Atoi(os.Getenv(name))
-	if err == nil {
-		return v
-	}
-	return fallback
-}
-func envFloat(name string, fallback float64) float64 {
-	v, err := strconv.ParseFloat(os.Getenv(name), 64)
 	if err == nil {
 		return v
 	}

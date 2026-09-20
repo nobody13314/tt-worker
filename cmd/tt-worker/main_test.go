@@ -138,12 +138,13 @@ func (p *fakeTargetProvider) ReportResults(context.Context, []model.Device, []mo
 
 type fakeGateway struct{ allocations int }
 
-func (g *fakeGateway) Allocate(context.Context, string, int) (proxygateway.Allocation, error) {
+func (g *fakeGateway) Allocate(_ context.Context, _ string, uses int) (proxygateway.Allocation, int, error) {
 	g.allocations++
-	return proxygateway.Allocation{AllocationID: strconv.Itoa(g.allocations)}, nil
+	return proxygateway.Allocation{AllocationID: strconv.Itoa(g.allocations)}, uses, nil
 }
 
 func (*fakeGateway) Report(context.Context, proxygateway.Report) error { return nil }
+func (*fakeGateway) Invalidate(string)                                 {}
 
 type fakeExecutor struct{}
 
@@ -170,7 +171,7 @@ func testClientFactory(proxygateway.Allocation) (*http.Client, func(), error) {
 
 func testConfig() config.Config {
 	return config.Config{
-		DeviceBatchSize: 100, GroupSize: 30, FailureRatio: .8,
-		MaxProxyRotations: 0, Concurrency: 30, WorkerID: "test-worker",
+		DeviceBatchSize: 100, ProxyReuseLimit: 10, GroupSize: 10,
+		Concurrency: 30, WorkerID: "test-worker",
 	}
 }

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,8 +14,9 @@ import (
 )
 
 type Gateway interface {
-	Allocate(context.Context, string, int) (proxygateway.Allocation, error)
+	Allocate(context.Context, string, int) (proxygateway.Allocation, int, error)
 	Report(context.Context, proxygateway.Report) error
+	Invalidate(string)
 }
 type ClientFactory func(proxygateway.Allocation) (*http.Client, func(), error)
 type Executor interface {
@@ -30,97 +32,74 @@ type Engine struct {
 	NewClient     ClientFactory
 	Executor      Executor
 	GroupSize     int
-	FailureRatio  float64
-	MaxRotations  int
 	Concurrency   int
 	RequestPrefix string
 }
 
 func (e *Engine) Run(ctx context.Context, devices []model.Device, target model.Target) (Result, error) {
 	if e.GroupSize < 1 {
-		e.GroupSize = 30
+		e.GroupSize = 10
 	}
 	if e.Concurrency < 1 {
 		e.Concurrency = e.GroupSize
 	}
-	if e.FailureRatio <= 0 {
-		e.FailureRatio = .8
-	}
 	result := Result{Total: len(devices)}
-	for start := 0; start < len(devices); start += e.GroupSize {
-		end := start + e.GroupSize
-		if end > len(devices) {
-			end = len(devices)
+	for start, groupIndex := 0, 0; start < len(devices); groupIndex++ {
+		wanted := e.GroupSize
+		if remaining := len(devices) - start; wanted > remaining {
+			wanted = remaining
 		}
-		ok, failed, rot, err := e.runGroup(ctx, devices[start:end], target, start/e.GroupSize)
-		result.Success += ok
-		result.FailedDevices = append(result.FailedDevices, failed...)
-		result.ProxyRotations += rot
+		requestID := fmt.Sprintf("%s-group-%d-%d", e.RequestPrefix, groupIndex, time.Now().UnixNano())
+		allocation, granted, err := e.Gateway.Allocate(ctx, requestID, wanted)
 		if err != nil {
 			return result, err
 		}
+		if granted < 1 || granted > wanted {
+			return result, fmt.Errorf("gateway granted invalid proxy use count %d for %d requests", granted, wanted)
+		}
+		group := devices[start : start+granted]
+		ok, failed, rotate, err := e.runGroup(ctx, allocation, group, target, groupIndex)
+		result.Success += ok
+		result.FailedDevices = append(result.FailedDevices, failed...)
+		if rotate {
+			result.ProxyRotations++
+		}
+		if err != nil {
+			return result, err
+		}
+		start += granted
 	}
 	result.Failed = result.Total - result.Success
 	return result, nil
 }
 
-func (e *Engine) runGroup(ctx context.Context, group []model.Device, target model.Target, groupIndex int) (int, []model.Device, int, error) {
-	pending := append([]model.Device(nil), group...)
-	success := 0
-	rotations := 0
-	for {
-		requestID := fmt.Sprintf("%s-group-%d-round-%d-%d", e.RequestPrefix, groupIndex, rotations, time.Now().UnixNano())
-		allocation, err := e.Gateway.Allocate(ctx, requestID, len(pending))
-		if err != nil {
-			return success, pending, rotations, err
-		}
-		client, closeClient, err := e.NewClient(allocation)
-		if err != nil {
-			return success, pending, rotations, err
-		}
-		failed, totalLatency, reasons := e.executeRound(ctx, client, pending, target)
-		closeClient()
-		roundSuccess := len(pending) - len(failed)
-		success += roundSuccess
-		avg := int64(0)
-		if len(pending) > 0 {
-			avg = totalLatency / int64(len(pending))
-		}
-		if err := e.Gateway.Report(ctx, proxygateway.Report{AllocationID: allocation.AllocationID, Total: len(pending), Success: roundSuccess, Failed: len(failed), AverageLatencyMS: avg, FailureReasons: reasons}); err != nil {
-			return success, failed, rotations, fmt.Errorf("report proxy result: %w", err)
-		}
-		failureRatio := float64(len(failed)) / float64(len(pending))
-		log.Printf(
-			"proxy round request_prefix=%s group=%d round=%d allocation_id=%s attempted=%d success=%d failed=%d failure_ratio=%.1f%%",
-			e.RequestPrefix, groupIndex+1, rotations+1, allocation.AllocationID, len(pending), roundSuccess, len(failed), failureRatio*100,
-		)
-		if len(failed) == 0 {
-			return success, nil, rotations, nil
-		}
-		if failureRatio < e.FailureRatio {
-			log.Printf(
-				"proxy rotation skipped request_prefix=%s group=%d failure_ratio=%.1f%% threshold=%.1f%% remaining_failed=%d",
-				e.RequestPrefix, groupIndex+1, failureRatio*100, e.FailureRatio*100, len(failed),
-			)
-			return success, failed, rotations, nil
-		}
-		if rotations >= e.MaxRotations {
-			log.Printf(
-				"proxy rotations exhausted request_prefix=%s group=%d replacements=%d remaining_failed=%d",
-				e.RequestPrefix, groupIndex+1, rotations, len(failed),
-			)
-			return success, failed, rotations, nil
-		}
-		log.Printf(
-			"proxy rotating request_prefix=%s group=%d replacement=%d/%d retry_devices=%d failure_ratio=%.1f%% threshold=%.1f%%",
-			e.RequestPrefix, groupIndex+1, rotations+1, e.MaxRotations, len(failed), failureRatio*100, e.FailureRatio*100,
-		)
-		pending = failed
-		rotations++
+func (e *Engine) runGroup(ctx context.Context, allocation proxygateway.Allocation, group []model.Device, target model.Target, groupIndex int) (int, []model.Device, bool, error) {
+	client, closeClient, err := e.NewClient(allocation)
+	if err != nil {
+		return 0, group, false, err
 	}
+	failed, totalLatency, reasons, proxyFailures := e.executeRound(ctx, client, group, target)
+	closeClient()
+	success := len(group) - len(failed)
+	avg := int64(0)
+	if len(group) > 0 {
+		avg = totalLatency / int64(len(group))
+	}
+	if err := e.Gateway.Report(ctx, proxygateway.Report{AllocationID: allocation.AllocationID, Total: len(group), Success: success, Failed: len(failed), AverageLatencyMS: avg, FailureReasons: reasons}); err != nil {
+		return success, failed, false, fmt.Errorf("report proxy result: %w", err)
+	}
+	rotate := proxyFailures >= 2
+	if rotate {
+		e.Gateway.Invalidate(allocation.AllocationID)
+	}
+	log.Printf(
+		"proxy batch request_prefix=%s group=%d allocation_id=%s attempted=%d success=%d failed=%d proxy_failures=%d invalidated=%t",
+		e.RequestPrefix, groupIndex+1, allocation.AllocationID, len(group), success, len(failed), proxyFailures, rotate,
+	)
+	return success, failed, rotate, nil
 }
 
-func (e *Engine) executeRound(ctx context.Context, client *http.Client, devices []model.Device, target model.Target) ([]model.Device, int64, map[string]int) {
+func (e *Engine) executeRound(ctx context.Context, client *http.Client, devices []model.Device, target model.Target) ([]model.Device, int64, map[string]int, int) {
 	type outcome struct {
 		device  model.Device
 		err     error
@@ -154,13 +133,25 @@ func (e *Engine) executeRound(ctx context.Context, client *http.Client, devices 
 	}()
 	failed := make([]model.Device, 0)
 	var latency int64
+	proxyFailures := 0
 	reasons := map[string]int{}
 	for r := range out {
 		latency += r.latency
 		if r.err != nil {
 			failed = append(failed, r.device)
-			reasons["target_business_failed"]++
+			if proxyFailure(r.err) {
+				reasons["proxy_request_failed"]++
+				proxyFailures++
+			} else {
+				reasons["target_business_failed"]++
+			}
 		}
 	}
-	return failed, latency, reasons
+	return failed, latency, reasons, proxyFailures
+}
+
+func proxyFailure(err error) bool {
+	type classified interface{ ProxyFailure() bool }
+	var value classified
+	return errors.As(err, &value) && value.ProxyFailure()
 }
